@@ -1,6 +1,6 @@
 {
   "name": "routefinder",
-  "version": "0.0.0",
+  "version": "0.1.0-0",
   "description": "Http request router, which is similar to express' router however rather than using ReqExp this router creates a route tree, which improves routing performance that is especially noticable when there are a huge amount of routes registered.",
   "main": "routefinder.js",
   "scripts": {
