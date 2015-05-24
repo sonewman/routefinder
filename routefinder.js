@@ -1,64 +1,75 @@
+module.exports = create
+create.Router = Router
 
-var url = require('url')
 var querystring = require('querystring')
+var methods = ['get', 'post', 'put', 'delete', 'options', 'connect', 'head'];
 
-
-module.exports = function (options) {
+function create(options) {
   var r = new Router(options)
   return r.handle
 }
 
-function Handle(params, callback) {
-  this.params = params
-  this.callback = callback
+function init(target, path) {
+  target.fullPath = (path[0] === '/') ? path.substr(1) : path
+  target.path = target.fullPath.split('/')
 }
 
-function RouteHandler() {
+var proto = {}
+proto.params = null
+proto.callback = null
+proto.fullPath = '/'
+proto.path = null
+
+function Handle(path, cb) {
+  init(this, path)
+  this.params = []
+  this.callback = cb
+}
+Handle.prototype = Object.create(proto)
+
+function Match(path) {
+  var split = path.split('?')
+  init(this, split[0] || '')
+  this.queryString = split[1] || ''
+  this.expectedParams = []
+  this.params = {}
+}
+Match.prototype = Object.create(proto)
+
+function Branch() {
   this.handles = []
 }
 
-RouteHandler.prototype.add = function (params, callback) {
-  this.handles.push(new Handle(params, callback))
+function tryMatchingParams(handleParams, matchParams) {
+  var matched = {}
+
+  for (var i = 0, l = handleParams.length; i < l; i += 1) {
+    var paramKey = handleParams[i]
+    var paramValue = matchParams[i]
+
+    if (paramKey.no === paramValue.no)
+      matched[paramKey.name] = paramValue.value
+    else
+      return null
+  }
+  return matched
 }
 
-RouteHandler.prototype.handle = function (request, params) {
+Branch.prototype.findMatch = function (match) {
   var handles = this.handles
-  var handlesLen = handles.length
-  var paramsLen = params.length
-  var paramKey
-  var paramValue
-  var matchedParams
-  var matchedRoute
-  var handleParams
-  var handleParamsLen
-  var handle
-  var i = 0
-  var j
 
-  for (; i < handlesLen; i++) {
-    handle = handles[i]
-    handleParams = handle.params
-    handleParamsLen = handleParams.length
+  for (var i = 0, l = handles.length; i < l; i += 1) {
+    var handle = handles[i]
+    var handleParams = handle.params
+    var paramsLen = handleParams.length
+    var expectedParams = match.expectedParams
 
-    if (handleParamsLen === paramsLen) {
-      matchedRoute = true
-      matchedParams = {}
-
-      for (j = 0; j < handleParamsLen; j++) {
-        paramKey = handleParams[j]
-        paramValue = params[j]
-
-        if (paramKey.no === paramValue.no) {
-          matchedParams[paramKey.name] = paramValue.value
-        } else {
-          matchedRoute = false
-          break
-        }
-      }
-
-      if (matchedRoute) {
-        request.req.params = matchedParams
-        handle.callback(request.req, request.res, request.next)
+    if (expectedParams.length === paramsLen) {
+      var matched = tryMatchingParams(handle.params, expectedParams)
+      if (matched !== null) {
+        match.params = matched
+        match.callback = handle.callback
+        return match
       }
     }
   }
@@ -67,33 +78,26 @@ RouteHandler.prototype.handle = function (request, params) {
 var paramKey = '#param'
 var handleKey = '#handle'
 
-function onHandle(handles, path, request, no, params) {
-  var step = path.shift()
-  var handler
-
-  if (step) {
-    no++
-    handler = handles[step]
-    if (!handler && handles[paramKey]) {
-      handler = handles[paramKey]
-      params.push({
-        value: step
-        , no: no
-      })
-    }
-
-    // Route existed
-    if (handler) onHandle(handler, path, request, no, params)
-
-  } else {
-    handler = handles[handleKey]
-
-    // not sure if this would not happen
-    if (handler) {
-      handler.handle(request, params)
-    }
-
+function walkBranches(branches, key, match, no) {
+  var branch = branches[key]
+  if (!branch && branches[paramKey]) {
+    branch = branches[paramKey]
+    match.expectedParams.push({ value: key, no: no })
   }
+
+  // Route existed
+  if (branch) return walkTree(branch, match, no)
+}
+
+function callHandle(handler, match) {
+  if (handler) return handler.findMatch(match)
+}
+
+function walkTree(branch, match, no) {
+  var key = match.path[no]
+  return key
+    ? walkBranches(branch, key, match, no + 1)
+    : callHandle(branch[handleKey], match)
 }
 
 function getParamName(part) {
@@ -101,30 +105,48 @@ function getParamName(part) {
   return (c === ':' || c === '*') && part.substr(1)
 }
 
-function addStep(handles, path, params, no, fn) {
-  var handle
-  var step = path.shift()
-  var paramName
+function keyBranch(branches, key) {
+  return branches[key] || (branches[key] = new Branch())
+}
 
-  if (step) {
+function addBranch(branches, handle, no) {
+  var branch
+  var key = handle.path[no]
 
-    no++
-    paramName = getParamName(step)
-    if (paramName) {
-      params.push({
-        name: paramName
-        , no: no
-      })
-      step = paramKey
+  if (key) {
+    no += 1
+    var name = getParamName(key)
+    if (name) {
+      handle.params.push({ name: name, no: no })
+      key = paramKey
     }
 
-    handle = handles[step] || (handles[step] = {})
-    addStep(handle, path, params, no, fn)
+    branch = branches[key] || (branches[key] = {})
+    addBranch(branch, handle, no)
   } else {
-    handle = handles[handleKey]
-      || (handles[handleKey] = new RouteHandler())
+    keyBranch(branches, handleKey).handles.push(handle)
+  }
+}
 
-    handle.add(params, fn)
+function createMethodMaps(map) {
+  for (var i = 0, l = methods.length; i < l; i += 1)
+    map[methods[i].toUpperCase()] = {}
+  return map
+}
+
+function handle_(router, req, res, next) {
+  var method = req.method
+  var u = req.url
+  var splitOnQuery = u.split('?')
+  u = splitOnQuery[0]
+  req.query = querystring.parse(splitOnQuery[1])
+
+  var matched = router.match(method, u)
+  if (matched) {
+    req.params = matched.params
+    matched.callback(req, res, next)
+  } else if ('function' === typeof next) {
+    next()
   }
 }
 
@@ -132,50 +154,25 @@ function Router(options) {
   if (!(this instanceof Router))
     return new Router(options)
 
-  var methods = this._methods = {}
+  var self = this
+  self._methods = createMethodMaps({})
 
   // create handle method which is bound to itself
-  this.handle = function (req, res, next) {
-    var method = req.method
-    var u = req.url
-    var splitOnQuery = u.split('?')
-
-    req.query = querystring.parse(splitOnQuery[1])
-    u = splitOnQuery[0]
-
-    var params = []
-    var request = {
-      req: req
-      , res: res
-      , next: next
-    }
-
-    var handles = methods[method]
-    if (u[0] === '/') u = u.substr(1)
-    if (handles) onHandle(handles, u.split('/'), request, 0, params)
+  self.handle = function (req, res, next) {
+    handle_(self, req, res, next)
   }
 }
 
-module.exports.Router = Router
+Router.prototype.match = function (method, path) {
+  return walkTree(this._methods[method], new Match(path), 0)
+}
 
 Router.prototype.route = function (method, path, fn) {
   method = method.toUpperCase()
-  var handles = this._methods[method]
-    || (this._methods[method] = {})
-
-  var params = []
-  if (path[0] === '/') path = path.substr(1)
-  addStep(handles, path.split('/'), params, 0, fn)
+  addBranch(this._methods[method], new Handle(path, fn), 0)
 }
 
-;[
-  'get'
-  , 'post'
-  , 'put'
-  , 'delete'
-  , 'options'
-  , 'connect'
-].forEach(function (verb) {
+methods.forEach(function (verb) {
   Object.defineProperty(Router.prototype, verb, {
     value: function (path, fn) {
       return this.route(verb, path, fn)
