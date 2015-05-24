@@ -10,7 +10,7 @@ function create(options) {
 }
 
 function init(target, path) {
-  target.fullPath = (path[0] === '/') ? path.substr(1) : path
+  target.fullPath = (path[0] === '/') ? path.substring(1) : path
   target.path = target.fullPath.split('/')
 }
 
@@ -36,28 +36,30 @@ function Match(path) {
 }
 Match.prototype = Object.create(proto)
 
-function Branch() {
-  this.handles = []
-}
-
-function tryMatchingParams(handleParams, matchParams) {
+function tryMatchingParams(handleP, matchP) {
   var matched = {}
+  for (var i = 0, l = handleP.length; i < l; i += 1) {
+    var key = handleP[i]
+    var value = matchP[i]
 
-  for (var i = 0, l = handleParams.length; i < l; i += 1) {
-    var paramKey = handleParams[i]
-    var paramValue = matchParams[i]
-
-    if (paramKey.no === paramValue.no)
-      matched[paramKey.name] = paramValue.value
-    else
-      return null
+    if (key.index === value.index) matched[key.value] = value.value
+    else return null
   }
   return matched
 }
 
-Branch.prototype.findMatch = function (match) {
-  var handles = this.handles
+function Param(index, value) {
+  this.index = index
+  this.value = value
+}
 
+function setMatched(match, params, callback) {
+  match.params = params
+  match.callback = callback
+  return match
+}
+
+function findMatch(handles, match) {
   for (var i = 0, l = handles.length; i < l; i += 1) {
     var handle = handles[i]
     var handleParams = handle.params
@@ -65,67 +67,75 @@ Branch.prototype.findMatch = function (match) {
     var expectedParams = match.expectedParams
 
     if (expectedParams.length === paramsLen) {
+      if (paramsLen === 0) {
+        return setMatched(match, matched, handle.callback)
+      }
+
       var matched = tryMatchingParams(handle.params, expectedParams)
       if (matched !== null) {
-        match.params = matched
-        match.callback = handle.callback
-        return match
+        return setMatched(match, matched, handle.callback)
       }
     }
   }
 }
 
 var paramKey = '#param'
+var starKey = '#star'
 var handleKey = '#handle'
 
-function walkBranches(branches, key, match, no) {
-  var branch = branches[key]
-  if (!branch && branches[paramKey]) {
-    branch = branches[paramKey]
-    match.expectedParams.push({ value: key, no: no })
+function walkTree(branches, match) {
+  var path = match.path
+  for (var i = 0, l = path.length; i < l; i += 1) {
+    var key = path[i]
+    var branch = branches[key]
+    
+    if (branch) {
+      branches = branch
+    } else if (branches[paramKey]) {
+      branches = branches[paramKey]
+      match.expectedParams.push(new Param(i, key))
+    } else {
+      return null
+    }
   }
 
-  // Route existed
-  if (branch) return walkTree(branch, match, no)
+  var handles = branches[handleKey]
+  if (!handles || handles.length === 0) return null
+  else return findMatch(handles, match)
 }
 
-function callHandle(handler, match) {
-  if (handler) return handler.findMatch(match)
-}
+var COLON = 58
+var STAR = 42
 
-function walkTree(branch, match, no) {
-  var key = match.path[no]
-  return key
-    ? walkBranches(branch, key, match, no + 1)
-    : callHandle(branch[handleKey], match)
-}
-
-function getParamName(part) {
-  var c = part[0]
-  return (c === ':' || c === '*') && part.substr(1)
-}
-
-function keyBranch(branches, key) {
-  return branches[key] || (branches[key] = new Branch())
-}
-
-function addBranch(branches, handle, no) {
+function addBranch(branches, handle) {
   var branch
-  var key = handle.path[no]
+  var path = handle.path
 
-  if (key) {
-    no += 1
-    var name = getParamName(key)
-    if (name) {
-      handle.params.push({ name: name, no: no })
+  for (var i = 0, l = path.length; i < l; i += 1) {
+    var key = path[i]
+    var c = key.charCodeAt(0)
+    var name = undefined
+
+    if (c === COLON) {
+      name = key.substring(1)
       key = paramKey
+    } else if (c === STAR) {
+      name = key.substring(1)
+      key = starKey
     }
 
-    branch = branches[key] || (branches[key] = {})
-    addBranch(branch, handle, no)
-  } else {
-    keyBranch(branches, handleKey).handles.push(handle)
+    if (name !== undefined)
+      handle.params.push(new Param(i, name))
+    
+    if (branches[key] === undefined) 
+      branches[key] = {}
+
+    branches = branches[key] 
   }
+  
+  var handles = branches[handleKey]
+  if (handles !== undefined) handles.push(handle)
+  else branches[handleKey] = [handle]
 }
 
 function createMethodMaps(map) {
@@ -135,13 +145,10 @@ function createMethodMaps(map) {
 }
 
 function handle_(router, req, res, next) {
-  var method = req.method
-  var u = req.url
-  var splitOnQuery = u.split('?')
-  u = splitOnQuery[0]
-  req.query = querystring.parse(splitOnQuery[1])
+  var r = new Match(req.url)
+  req.query = querystring.parse(r.queryString)
+  var matched = walkTree(router._methods[req.method], r)
 
-  var matched = router.match(method, u)
   if (matched) {
     req.params = matched.params
     matched.callback(req, res, next)
@@ -164,12 +171,12 @@ function Router(options) {
 }
 
 Router.prototype.match = function (method, path) {
-  return walkTree(this._methods[method], new Match(path), 0)
+  return walkTree(this._methods[method], new Match(path))
 }
 
 Router.prototype.route = function (method, path, fn) {
   method = method.toUpperCase()
-  addBranch(this._methods[method], new Handle(path, fn), 0)
+  addBranch(this._methods[method], new Handle(path, fn))
 }
 
 methods.forEach(function (verb) {
